@@ -1,0 +1,31 @@
+h1 {
+  color: #c70000;
+}
+
+h2 {
+  color: #4d4d4d;
+}
+
+h3 {
+  color: #666666;
+}
+
+/* unvisited link */
+a:link {
+  color: #ff1f1f;
+}
+
+/* visited link */
+a:visited {
+  color: #969696;
+}
+
+/* mouse over link */
+a:hover {
+  color: #c70000;
+}
+
+/* selected link */
+a:active {
+  color: #7d0000;
+}

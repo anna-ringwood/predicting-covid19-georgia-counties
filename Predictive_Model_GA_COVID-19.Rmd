@@ -1,0 +1,528 @@
+---
+title: "A Predictive Model for COVID-19 Death Rates in Georgia Counties"
+author: "Anna Ringwood"
+date: "4/25/2021"
+output:
+  html_document:
+    css: css_template.css
+---
+
+# Downloading Data
+
+[County Health Rankings](https://www.countyhealthrankings.org/app/georgia/2020/downloads) - 4/13/2021 11:03 AM EDT
+
+[American Community Survey](https://data.census.gov/cedsci/all?q=United%20States&g=0400000US13.050000&d=ACS%205-Year%20Estimates%20Data%20Profiles) - 4/13/2021 11:07 AM EDT
+
+[Georgia Department of Public Health](https://dph.georgia.gov/covid-19-daily-status-report) - 4/13/2021 11:08 AM EDT
+
+***
+
+# Before R
+
+Copy all original data into Working Data folder.
+
+*County Health Rankings (CHR):*
+
+  - Extract Ranked and Additional sheets from Workbook as .csv files.
+  
+  - Change "%" and "#" characters to "pct" and "num", respectively.
+  
+  - To avoid confusion with repeated variables, add prefixes and suffixes to certain variables:
+  
+    - For RANKED data:
+    
+      - To `95pct CI - Low`, `95pct CI - High`, and `Z-Score`, add prefixes: "YPLL", "Fair Poor Health", "Phys Unhealth", "Ment Unhealth", "LBW", "Smokers", "Obesity", "Phys Inact", "Excess Drink", "Alc Driving Deaths", "Teen BR", "Uninsured", "Some College", "Child Poverty", "Single Parent", "Injury Deaths", "House Problems", "Drive Alone", and "Drive Alone Long Commute".
+      
+      - To `Z-Score`, add prefixes: "Food Env Ind", "Access to Exercise, "Chlamydia", "PCP", "Dentist", "MHPV", "Preventable Hosp", "Mammogram", "Vaccinated", "HS Graduation", "Unemployed", "Income Ratio", "Social Associations", "Violent Crime", "Daily PM2.5", "Water Violation"
+      
+      - To `Cohort Size`, add prefix: "HS Graduation"
+  
+    - For ADDITIONAL data:
+  
+      - To `95pct CI - Low` and `95pct CI - High`, add prefixes: "Life Expectancy", "Phys Dist", "Ment Dist", "Diabetes", "Motor Vehicle", "Sleep", "Disconnected Youth", "Med HH Inc", "Homicide", "Firearm Fatalities", "Homeowners", "Housing Cost", and "Not English Prof".
+      
+      - To `95pct CI - Low`, `95pct CI - High`, *and* `num Deaths`, add prefixes: "Age-Adjusted", "Child Mortality", "Infant Mortality"
+      
+      - To `95pct CI - Low`, `95pct CI - High`, `num Deaths`, *and* `Crude Rate`, add prefix: "Suicide"
+    
+      - There are two sets of the same variables: `num Uninsured`, `pct Uninsured`, `95pct CI - Low`, and `95pct CI - High`:
+      
+        - To the first set, add suffix "Adults" to `num Uninsured` and `pct Uninsured` and add prefix "Uninsured Adults" to `95pct CI - Low` and `95pct CI - High`.
+        
+        - To the second set, add suffix "Children" to `num Uninsured` and `pct Uninsured` and add prefix "Uninsured Children" to `95pct CI - Low` and `95pct CI - High`.
+        
+      - There are two sets of the same variables: `Average Grade Performance`, `Average Grade Performance (Asian)`, `Average Grade Performance (Black)`, `Average Grade Performance (Hispanic)`, and `Average Grade Performance (White)`.
+      
+        - To the first set, add prefix "Reading".
+        
+        - To the second set, add prefix "Math".
+        
+      - To the first `Segregation Index` variable, add suffix "Black-White". To the second, add suffix "nonWhite-White".
+      
+      - To `Non-Petitioned Cases`, `Petitioned Cases`, and `Denominator`, add prefix "Juvenile Arrests".
+  
+*American Community Survey (ACS):*
+
+  - Rename files in an intuitive manner:
+  
+    - Table DP02: Selected Social Characteristics
+    
+    - Table DP03: Selected Economic Characteristics
+    
+    - Table DP04: Selected Housing Characteristics
+  
+    - Table DP05: Demographic and Housing Estimates
+    
+*Georgia Department of Public Health (DPH):*
+
+  - No changes needed.
+
+***
+
+# Begin Analysis in R
+
+```{r setup, include=FALSE}
+options(scipen=999)
+```
+
+### Load necessary libraries
+
+```{r, message=F, warning=F}
+library(janitor)
+library(tinytex)
+library(tidyverse)
+library(naniar)
+library(mice)
+library(caret)
+library(glmnet)
+library(stringr)
+library(missForest)
+library(forcats)
+library(reshape2)
+library(rcartocolor)
+library(officer)
+library(car)
+library(ggpubr)
+library(ggrepel)
+library(report)
+library(flextable)
+set_flextable_defaults(
+  font.family = "Arial", 
+  font.size = 10,
+  font.color = "black"
+  )
+```
+
+### Import data, streamline the variable name format across all data sets, and extract variables relevant to analysis
+
+```{r}
+chrR <- read.csv("Working Data/CHR Georgia 2020 Data/2020 CHR Ranked Data.csv", skip = 2, header = TRUE) %>%
+  clean_names() %>%
+  select(!contains(c("95pct_ci_", "z_score", "num_", "_ratio")), -c("labor_force", "hs_graduation_cohort_size", "annual_average_violent_crimes", "state"), "income_ratio") %>%
+  filter(fips != 13000)
+
+chrA <- read.csv("Working Data/CHR Georgia 2020 Data/2020 CHR Additional Data.csv", skip = 2, header = TRUE) %>%
+  clean_names() %>%
+  select(!contains(c("95pct_ci_", "z_score", "num_", "_ratio")), -"state") %>%
+  filter(fips != 13000)
+
+acsSocial <- read.csv("Working Data/ACS Georgia 2015-2019 Data Profiles/DP02 - Selected Social Characteristics Data.csv", skip = 1, header = TRUE) %>%
+  clean_names() %>%
+  select(id, geographic_area_name, contains("percent") & !contains("margin_of_error")) %>%
+  filter(geographic_area_name != "United States")
+
+acsEcon <- read.csv("Working Data/ACS Georgia 2015-2019 Data Profiles/DP03 - Selected Economic Characteristics Data.csv", skip = 1, header = TRUE) %>%
+  clean_names() %>%
+  select(id, geographic_area_name, contains("percent") & !contains("margin_of_error")) %>%
+  filter(geographic_area_name != "United States")
+
+acsHouse <- read.csv("Working Data/ACS Georgia 2015-2019 Data Profiles/DP04 - Selected Housing Characteristics Data.csv", skip = 1, header = TRUE) %>%
+  clean_names() %>%
+  select(id, geographic_area_name, contains("percent") & !contains("margin_of_error")) %>%
+  filter(geographic_area_name != "United States")
+
+acsDemogs <- read.csv("Working Data/ACS Georgia 2015-2019 Data Profiles/DP05 - Demographic and Housing Estimates Data.csv", skip = 1, header = TRUE) %>%
+  clean_names() %>%
+  select(id, geographic_area_name, contains("percent") & !contains("margin_of_error")) %>%
+  filter(geographic_area_name != "United States")
+
+dphDeaths <- read.csv("Working Data/DPH Georgia COVID-19 Data 2/county_cases.csv", header = TRUE) %>%
+  clean_names() %>%
+  select(county_name, county_id, death_rate) %>%
+  filter(county_name != "Unknown", county_name != "Non-GA Resident/Unknown State") %>%
+  mutate(county_id = as.numeric(str_remove_all(.$county_id, "US-"))) %>%
+  rename(deaths_per_100k = death_rate)
+```
+
+***
+
+# Combine Data Sets Based on Source
+
+For conciseness, we combine the two data sets from the CHR together and combine the four data sets from the ACS together. Only one data frame is taken from the DPH, so it is not combined. We also clean the `id` and `geographic_area_name` columns in the ACS data set now that they have been aggregated.
+
+```{r}
+chrFull <- full_join(chrR, chrA, by = c("fips", "county"))
+acsFull <- acsSocial %>%
+  full_join(acsEcon, by = c("id", "geographic_area_name")) %>%
+  full_join(acsHouse, by = c("id", "geographic_area_name")) %>%
+  full_join(acsDemogs, by = c("id", "geographic_area_name")) %>%
+  mutate(id = as.numeric(str_sub(.$id, start = -5, end = -1)),
+         geographic_area_name = str_remove_all(.$geographic_area_name, " County, Georgia")) %>%
+  select(geographic_area_name, where(is.numeric))
+```
+
+Check data types:
+
+```{r}
+chrTypes <- lapply(chrFull, class)
+chrNonNum <- chrTypes[chrTypes != "integer" & chrTypes != "numeric"]
+chrNonNumNonLog <- chrNonNum[chrNonNum != "logical"]
+acsTypes <- lapply(acsFull, class)
+acsNonNum <- acsTypes[acsTypes != "integer" & acsTypes != "numeric"]
+```
+
+Besides the county name variable, the ACS data is all either numeric or integer. The DPH data is numeric for both the county ID and deaths per 100,000 people, and character for the county name.
+
+The CHR data has some non-numeric/integer columns. All columns subset for American Indian/Alaska Native are completely empty, and therefore are of type logical (boolean). The remaining variables (4) are all of type character and include the county name, an indicator for an unreliable low birth weight metric, an indicator for the presence of a water violation, and the number of juvenile arrests: non-petitioned cases (which is character due to an observation of "4-Jan" for one county - Troup County). Of these, we can re-code the water violation column to a dummy variable. We could try to re-code the "4-Jan" observation for the juvenile arrests variable, but this variable will eventually be removed due to its large proportion of missing observations.
+
+```{r}
+chrFull$water_violation_num[chrFull$presence_of_water_violation == "No"] <- 0
+chrFull$water_violation_num[chrFull$presence_of_water_violation == "Yes"] <- 1
+# Check for correct re-coding:
+chrFull$water_violation_num
+```
+
+***
+
+# Examine Missing Data
+
+### Create function to return the percent of missing observations in a data set
+
+Since we intend to run a lasso regression, which itself only accepts numeric/integer variables, we will examine the percent of missing data for a data set's *numeric and integer variables only*.
+
+*Note:* By default, filtering for only numeric and integer data will not include any variables missing 100% of observations, as these variables are encoded as "logical" when imported into R.
+
+```{r}
+count_na <- function(x){return(sum(is.na(x)))}
+pctMissing <- function(x){sum(is.na(x))/length(x)*100}
+
+get_pct_missing <- function(df){
+  ## Takes a single data frame as an argument and returns the percent of all observations that are missing, 
+  ## along with summary statistics about the percent of missing observations for each variable (column)
+  
+  df <- df %>%
+    select(where(is.numeric))
+  
+  fields_total <- length(df) * nrow(df)
+  fields_missing <- df %>%
+    summarize(across(everything(), count_na)) %>%
+    sum()
+  all_miss <- fields_missing/fields_total*100
+  
+  if(all_miss > 0){
+    df_pctMiss <- df %>%
+      summarize(across(everything(), pctMissing))
+    pcts <- as.numeric(slice(df_pctMiss[1,]))
+    summ_pcts <- c(SD = sd(pcts), Median = median(pcts), Min = min(pcts), Max = max(pcts))
+    message("Percent missing across columns: Mean = ", round(mean(pcts), 2),
+            "%; SD = ", round(sd(pcts), 2), "%; Median = ", round(median(pcts), 2),
+            "%; Min Percent = ", min(pcts), "%; Max Percent = ", round(max(pcts), 2), "%")
+  }
+  
+  return(paste0("Total observation fields: ", fields_total, "; Empty observation fields: ", fields_missing, "; Overall percent of missing data: ", round(all_miss, 2), "%"))
+}
+```
+
+### Examine presence of missing data
+
+```{r}
+get_pct_missing(chrFull)
+get_pct_missing(acsFull)
+get_pct_missing(dphDeaths)
+```
+
+The only source missing data is the CHR, whose columns range from 99.37% missing to 0% missing, with 33.88% of the data missing overall.
+
+### Identify the columns with missing data and their respective proportions, and remove specific variables
+
+```{r}
+chrMiss <- apply(chrFull, 2, pctMissing)
+chrMiss <- data.frame(chrMiss) %>%
+  arrange(desc(chrMiss)) %>%
+  filter(chrMiss != 0)
+```
+
+The majority of columns that are missing data are those that group by race and ethnicity. Due to the large quantities of missing data in these variables, we remove them entirely from the analysis. We are confident that the demographic information in the ACS data set will provide enough racial and ethnic information for our analysis.
+
+```{r}
+chrFull2 <- chrFull %>%
+  select(!contains(c("aian", "asian", "black", "hispanic", "white", "_ratio", "_unreliable")), -c("reading_average_grade_performance", "math_average_grade_performance", "pct_american_indian_alaska_native", "pct_native_hawaiian_other_pacific_islander", "pct_female", "pct_rural", "population.x", "population.y", "pct_less_than_18_years_of_age", "pct_65_and_over"))
+
+## Check data:
+get_pct_missing(chrFull2)
+chrMiss2 <- apply(chrFull2, 2, pctMissing)
+chrMiss2 <- data.frame(chrMiss2) %>%
+  arrange(desc(chrMiss2)) %>%
+  filter(chrMiss2 != 0)
+```
+
+There still remain 28 variables with at least one observation missing, with the greatest percentage of missing data being 83.65%. To reduce variability in our analysis, and because the variables missing data are more socioeconomically-focused and can thus be accounted for by the complete ACS data, we remove any variable missing more than 10% of its observations.
+
+```{r}
+gt10pct <- chrMiss2 %>%
+  rownames_to_column() %>%
+  filter(chrMiss2 > 10) %>%
+  pull(1)
+
+chrFull3 <- chrFull2 %>%
+  select(!all_of(gt10pct))
+
+## Check data:
+get_pct_missing(chrFull3)
+```
+
+Overall, 0.61% (SD 1.58%) of our data is missing, with the greatest amount of missing data for a single variable being 8.18%. Rather than dealing with our missing observations with listwise or pairwise deletion, which have been shown to produce biased results, we will perform imputation by missForest, a method which is common in data analysis.
+
+# Impute Missing Data and Perform Lasso
+
+From here on out, we will be running two (technically four) procedures simultaneously:  
+1. Imputation using only CHR, lasso using ACS + CHR  
+2. Imputation using ACS + CHR, lasso using ACS + CHR
+
+### missForest using only CHR variables
+
+```{r}
+set.seed(1441)
+mF_impute_chr <- chrFull3 %>%
+  select(where(is.numeric), -fips) %>%
+  missForest()
+mF_impute_chr$OOBerror
+mF_chr <- bind_cols(acsFull[,c(1,2)], mF_impute_chr$ximp, acsFull[,-c(1,2)]) %>%
+  full_join(dphDeaths, by = c("id" = "county_id", "geographic_area_name" = "county_name")) %>%
+  select(where(is.numeric), -id)
+```
+
+### missForest using both CHR and ACS variables
+
+```{r}
+set.seed(1441)
+mF_impute_both <- chrFull3 %>%
+  full_join(acsFull, by = c("fips" = "id", "county" = "geographic_area_name")) %>%
+  select(where(is.numeric), -fips) %>%
+  missForest()
+mF_impute_both$OOBerror
+mF_both <- bind_cols(acsFull[,c(1,2)], mF_impute_both$ximp) %>%
+  full_join(dphDeaths, by = c("id" = "county_id", "geographic_area_name" = "county_name")) %>%
+  select(where(is.numeric), -id)
+```
+
+The two data sets, `mF_chr` and `mF_both`, are identical in the number of observations and specific variables contained, the only difference is that the missing CHR data in the first was imputed using only observed CHR data, while the missing CHR data in the second was imputed using the CHR observed data in addition to the ACS data.
+
+Function for conducting lasso:
+
+```{r}
+county_names <- pull(dphDeaths, "county_name")
+
+do_a_lasso <- function(df, seed = 1441){
+  
+  # 1. Set seed for reproducibility
+  set.seed(seed)
+  # 2. Split data into test and training sets
+  trainingSamps <- df$deaths_per_100k %>%
+    createDataPartition(p = 0.8, list = FALSE)
+  trainingSet  <- df[trainingSamps, ]
+  testingSet <- df[-trainingSamps, ]
+  # 3. Set up a grid of lambda values
+  lambda <- 10^seq(-3, 3, length = 100)
+  # 4. Build the model
+  lasso_reg <- train(deaths_per_100k ~., data = trainingSet, method = "glmnet",
+                     preProcess = c("center", "scale"),
+                     trControl = trainControl("cv", number = 10),
+                     tuneGrid = expand.grid(alpha = 1, lambda = lambda))
+  # 5. Model coefficients
+  coefs <- coef(lasso_reg$finalModel, lasso_reg$bestTune$lambda)
+  model_vars <- names(which(coefs[,1] != 0))
+  temp_df1 <- data.frame(coefs[model_vars,]) %>%
+    rownames_to_column()
+  names(temp_df1) <- c("Predictor", "Coefficient")
+  # 6. Make predictions
+  predictions <- predict(lasso_reg, testingSet)
+  temp_df2 <- data.frame(County = county_names[-trainingSamps], 
+                         Prediction = predictions)
+  # 7. Model prediction performance
+  temp_df3 <- data.frame(
+    RMSE = RMSE(predictions, testingSet$deaths_per_100k),
+    Rsquare = R2(predictions, testingSet$deaths_per_100k))
+  # 8. Combine results for output
+  results_list <- list(lasso_reg, temp_df1, temp_df2, temp_df3)
+  return(results_list)
+}
+```
+
+```{r, warning = F}
+mF_chr_lasso <- do_a_lasso(mF_chr)
+mF_both_lasso <- do_a_lasso(mF_both)
+
+acs_only_lasso <- acsFull %>%
+full_join(dphDeaths, by = c("id" = "county_id", "geographic_area_name" = "county_name")) %>%
+select(where(is.numeric), -id) %>%
+do_a_lasso()
+
+chr_only_lasso <- bind_cols(acsFull[,c(1,2)], mF_impute_chr$ximp) %>%
+  full_join(dphDeaths, by = c("id" = "county_id", "geographic_area_name" = "county_name")) %>%
+  select(where(is.numeric), -id) %>%
+  do_a_lasso()
+```
+
+```{r}
+all_R_stats <- rbind(mF_chr_lasso[[4]],
+      mF_both_lasso[[4]],
+      acs_only_lasso[[4]],
+      chr_only_lasso[[4]])
+lassos <- c("mF_CHR_lasso_both", "mF_both_lasso_both", "mF_none_lasso_ACS", "mF_CHR_lasso_CHR")
+cbind(lassos, all_R_stats)
+```
+
+Interestingly, the model does slightly worse when only using the ACS data. It does about the same regardless of the data set combination upon which the CHR data was imputed.
+
+# Continuing Analysis and Summarizing Results
+
+The selected model is the one based upon only the CHR data set, which contains 58 predictor variables and 159 observations. 
+
+The model based only upon the CHR data set has the lowest R-squared and RMSE values as well as the fewest number of predictors.
+
+```{r}
+lasso_results <- chr_only_lasso[[1]]
+lasso_coefs <- chr_only_lasso[[2]][-1,]
+lasso_predicts <- chr_only_lasso[[3]]
+lasso_perform <- chr_only_lasso[[4]]
+```
+
+## Visualizations
+
+### **Table 1.** Coefficient Table
+
+```{r}
+cleaned_names <- c("Number of Premature Deaths", "Low Birth Weight Rate", "Physical Inactivity Rate", "High School Graduation Rate", "College Enrollment Rate", "Children in Poverty Rate", "Single-Parent Household Rate", "Social Associations per 10,000 people", "Frequency of Housing Problems", "Life Expectancy (years)", "Limited Healthy Food Access Rate", "Free or Reduced Lunch Enrollment Rate")
+
+ordered_coefs <- lasso_coefs %>%
+  mutate(Predictor = cleaned_names,
+         Coefficient = round(Coefficient, 3)) %>%
+  arrange(desc(abs(Coefficient)))
+
+coefs_ft <- flextable(ordered_coefs) %>%
+  width(j = c(1, 2), width = c(3, 2)) %>%
+  hline_bottom(border = NULL) %>%
+  hline_top(border = NULL, part = "all") %>%
+  bold(part = "header") %>%
+  footnote(i = c(1, 5), j = 1, 
+                     value = as_paragraph(c("Percentage of adults aged 25-44 with at least some college education.", "Percentage of households with at least one of these housing problems: overcrowding, high housing costs, lack of kitchen facilities, lack of plumbing facilities."))) %>%
+  add_header_lines(values = "Table 1. Coefficients for lasso regression of 58 predictor variables on COVID-19 death rates (N = 159).")
+
+coefs_ft
+```
+
+Table 1 contains the final predictors and their corresponding coefficients, ordered by coefficient magnitude.
+
+### **Table 2.** Model Performance Table
+
+```{r}
+perform_df <- rownames_to_column(data.frame(t(lasso_perform)))
+names(perform_df) <- c("Metric", "Value")
+perform_df[,1] <- c("RMSE", "R-Squared")
+perform_df[,2] <- round(perform_df[,2], 3)
+perform_ft <- flextable(perform_df) %>%
+  width(j = c(1, 2), width = c(3, 2)) %>%
+  hline_bottom(border = NULL) %>%
+  hline_top(border = NULL, part = "all") %>%
+  bold(part = "header") %>%
+  add_header_lines(values = "Table 2. Performance metrics for lasso regression of 58 predictor variables on COVID-19 death rates (N = 159).")
+
+perform_ft
+```
+
+Table 2 displays the root mean squared error (RMSE) and R2 values for the present model. The model was able to account for 37.1% of the overall variance in the COVID-19 death rates. More absolutely, the predictions made by our model are generally off by approximately 88 deaths per 100,000 people.
+
+### **Figure 1.** Magnitude and direction of coefficients for each predictor variable in the lasso model. 
+
+Outcome variable is deaths due to COVID-19 per 100,000 people across Georgia counties.
+
+```{r}
+coef_importance <- lasso_coefs %>%
+  mutate(Predictor = cleaned_names,
+         Predictor = fct_reorder(Predictor, Coefficient)) %>%
+ggplot(aes(x = Predictor, y = Coefficient)) +
+  geom_segment(aes(x=Predictor, xend=Predictor, y=0, yend=Coefficient), size = 1.4, color = "#c70000") +
+  geom_point(size=3) +
+  theme_light() +
+  coord_flip(ylim = c(-30, 30)) +
+  geom_label(label = round(lasso_coefs$Coefficient, 2),
+             nudge_y = ifelse(lasso_coefs$Coefficient > 0, 5, -5) * 1,
+             label.size = 0) +
+  theme(panel.grid.major.x = element_line(color = "gray45"),
+        axis.ticks.x = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_text(margin = ggplot2::margin(r = 10))) +
+  labs(title = "Figure 1. The Relative Importances of LASSO Regression Coefficients \non COVID-19 Death Rates", subtitle = "per 100,000 people, grouped by Georgia Counties", y = "Coefficient Value", x = "Predictor Variable")
+
+coef_importance
+```
+
+Figure 1 presents a visual representation of both the magnitude and direction of the model coefficients for each included predictor.
+
+### **Figure 2.** Model-predicted vs. actual COVID-19 deaths per 100,000 people.
+
+```{r}
+resids_df <- left_join(lasso_predicts, dphDeaths[,c(1, 3)], by = c("County" = "county_name")) %>%
+  mutate(residuals = deaths_per_100k - Prediction)
+
+y_y_hat <- ggplot(resids_df, aes(x = deaths_per_100k, y = Prediction)) + 
+  geom_point() + 
+  geom_smooth(method = "lm", se = F, color = "#c70000") + 
+  labs(title = "Figure 2. Predicted vs. Actual COVID-19 Deaths",
+       x = "Actual (per 100,000 people)",
+       y = "Predicted (per 100,000 people)") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(margin = ggplot2::margin(t = 10)),
+        axis.title.y = element_text(margin = ggplot2::margin(r = 10)))
+
+y_y_hat
+```
+
+Figure 2 displays a linear regression of the predicted and actual death rates for the model’s testing set. 
+
+### **Figure 3.** Plot of residuals in relation to model-predicted deaths.
+
+```{r}
+y_hat_resids <- ggplot(resids_df, aes(x = Prediction, y = residuals)) +
+  geom_point() +
+  geom_hline(yintercept = 0, color = "#c70000", size = 1) + 
+  labs(title = "Figure 3. Residuals Plot", x = "Predicted Deaths (per 100,000 people)",
+       y = "Residuals") +
+  theme_minimal() +
+  theme(axis.title.x = element_text(margin = ggplot2::margin(t = 10)),
+        axis.title.y = element_text(margin = ggplot2::margin(r = 10)))
+
+y_hat_resids
+```
+
+Figure 3 presents the residuals in relation to the values predicted by the model for the same testing set.
+
+# Exports
+
+```{r}
+outputs_doc <- read_docx()
+outputs_doc <- body_add_flextable(outputs_doc, coefs_ft)
+outputs_doc <- body_add_flextable(outputs_doc, perform_ft)
+outputs_doc <- body_add_gg(outputs_doc, coef_importance, width = 8, height = 4.5, res = 300, style = "centered")
+outputs_doc <- body_add_gg(outputs_doc, y_y_hat, width = 5, height = 4.5, res = 300, style = "centered")
+outputs_doc <- body_add_gg(outputs_doc, y_hat_resids, width = 5, height = 4.5, res = 300, style = "centered")
+print(outputs_doc, "Output Figures.docx")
+```
+
+# References
+
+```{r, warning=F, echo=F, comment=''}
+cite_packages()
+```
